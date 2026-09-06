@@ -12,6 +12,9 @@ import {
   UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
+import type { Readable } from 'stream';
 import storageConfig from '../config/storage.config';
 
 export interface UploadedPart {
@@ -142,8 +145,14 @@ export class StorageService implements OnModuleInit {
     );
   }
 
-  /** Reads an object fully into memory — used by the Video Worker to fetch the source file. */
-  async getObjectBuffer(key: string): Promise<Buffer> {
+  /**
+   * Streams an object straight to disk — used by the Video Worker to fetch the
+   * source file. Never materializes the object in memory: for a file up to the
+   * platform's 10GB upload limit, buffering it whole would risk exhausting the
+   * worker process's memory. `pipeline` also propagates backpressure and
+   * rejects on either side failing, instead of leaving a half-written file.
+   */
+  async downloadObjectToFile(key: string, destPath: string): Promise<void> {
     const result = await this.client.send(
       new GetObjectCommand({ Bucket: this.bucket, Key: key }),
     );
@@ -152,8 +161,7 @@ export class StorageService implements OnModuleInit {
       throw new Error(`S3 returned no body for object ${key}`);
     }
 
-    const bytes = await result.Body.transformToByteArray();
-    return Buffer.from(bytes);
+    await pipeline(result.Body as Readable, createWriteStream(destPath));
   }
 
   async getPresignedDownloadUrl(

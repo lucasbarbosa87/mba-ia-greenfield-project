@@ -81,6 +81,7 @@
   - Vídeo de teste gerado on-the-fly com o `ffmpeg` do sistema (`ffmpeg -f lavfi -i color=... `) em vez de commitar um binário de fixture.
   - Teste "arquivo inválido" sobe um `.txt` como se fosse vídeo — `ffprobe` falha, `VideoProcessor` captura o erro internamente e marca `status: failed` sem derrubar o Worker (o job BullMQ em si completa normalmente, já que o erro é tratado dentro do `process()`).
   - `docker compose up -d video-worker` confirmado subindo como container separado do `nestjs-api` (mesma imagem, mesmo padrão idle — app iniciado sob demanda via `npm run start:worker:dev`, igual ao `nestjs-api`).
+  - **Bug pego só ao planejar um teste manual de 10GB (pós-implementação, antes de abrir o PR):** `StorageService.getObjectBuffer` lia o objeto inteiro pra memória (`Body.transformToByteArray()`) antes de gravar em disco — para um vídeo próximo do limite de 10GB, isso materializaria ~10GB num único `Buffer` no processo do worker, correndo risco real de OOM (a VM do Docker Desktop usada em dev tem ~7.75GB de RAM total, menos que o próprio arquivo). Substituído por `StorageService.downloadObjectToFile`, que faz `pipeline(s3Body, fs.createWriteStream(destPath))` — o objeto nunca é materializado inteiro em memória, é transmitido em stream direto pro disco. `VideoProcessor` atualizado pra usar o novo método. Suíte de integração do processor (vídeo sintético pequeno) e de storage seguem verdes; `getObjectBuffer` foi removido por não ter mais nenhum uso.
 
 ## Final Verification (Definition of Done)
 

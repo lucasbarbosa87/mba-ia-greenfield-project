@@ -62,10 +62,10 @@ export class VideoProcessor extends WorkerHost {
     const sourcePath = path.join(tempDir, 'source');
 
     try {
-      const sourceBuffer = await this.storageService.getObjectBuffer(
+      await this.storageService.downloadObjectToFile(
         video.object_key as string,
+        sourcePath,
       );
-      await fs.writeFile(sourcePath, sourceBuffer);
 
       const metadata = await this.probe(sourcePath);
       const durationSeconds = Math.round(metadata.format?.duration ?? 0);
