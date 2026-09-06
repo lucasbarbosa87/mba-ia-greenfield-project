@@ -13,8 +13,10 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **MinIO:** `docker compose exec minio curl -f http://localhost:9000/minio/health/live` — expect no error (empty 200 response)
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
 
-Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
+Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment". Same rule for the Video Worker (`npm run start:worker:dev`) — it is a separate long-running process, not part of "infrastructure".
 
 ## Development Environment
 
@@ -29,11 +31,18 @@ docker compose exec nestjs-api npm install
 
 # Run the dev server (watch mode)
 docker compose exec nestjs-api npm run start:dev
+
+# Run the video worker (watch mode) — separate process, consumes the video-processing queue
+docker compose exec video-worker npm run start:worker:dev
 ```
 
 Services:
 - `nestjs-api` — NestJS API, port `3000`
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `mailpit` — SMTP capture + web UI, ports `1025` (SMTP) / `8025` (UI)
+- `minio` — S3-compatible object storage, ports `9000` (API) / `9001` (console), credentials `streamtube`/`streamtube123`
+- `redis` — BullMQ backend, port `6379`
+- `video-worker` — idle container (same image as `nestjs-api`); the actual worker process is started on demand via `npm run start:worker:dev` / `start:worker`, same pattern as `nestjs-api`
 
 All verification and teardown commands run on the **host machine**:
 
@@ -148,6 +157,30 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
+
+## Videos Module (Upload & Processing)
+
+Video upload and background processing, added in Phase 03. Planning artifacts: `docs/decisions/technical-decisions-phase-03-videos.md` and `docs/phases/phase-03-videos/`.
+
+**Entity** (`src/videos/entities/video.entity.ts`): `Video`, table `videos`, `@ManyToOne` to `Channel`. Status lifecycle: `draft → uploading → processing → ready | failed`. Holds `object_key`/`thumbnail_key` (storage keys), `upload_id` (S3 multipart upload id, cleared on completion), `part_count`, and `duration_seconds` (populated by the worker).
+
+**Endpoints** (`src/videos/videos.controller.ts`, `src/videos/videos.service.ts`):
+
+| Method & Path | Auth | Purpose |
+|---|---|---|
+| `POST /videos` | JWT | Registers a draft `Video` owned by the caller's channel, opens an S3 multipart upload, returns presigned part URLs (client uploads directly to storage — the file never passes through the API) |
+| `GET /videos/:id/upload-parts` | JWT, owner | Resumes an interrupted upload: lists parts already received by storage and returns fresh presigned URLs only for the missing ones |
+| `POST /videos/:id/complete-upload` | JWT, owner | Completes the S3 multipart upload, flips status to `processing`, enqueues the processing job |
+| `GET /videos/:id/playback-url` | `@Public()` | Presigned inline `GetObjectCommand` URL for streaming (only when `status: ready`) |
+| `GET /videos/:id/download-url` | `@Public()` | Same as playback-url but with `ResponseContentDisposition: attachment`, forcing a browser download |
+
+**Storage** (`src/storage/storage.service.ts`, `src/config/storage.config.ts`): `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` pointed at the `minio` service (`endpoint` + `forcePathStyle: true`) — swap the endpoint/credentials for real S3 in production, no code change needed. Auto-creates the bucket on module init (`HeadBucketCommand` → `CreateBucketCommand`).
+
+**Queue** (`src/queue/`): `@nestjs/bullmq` + `bullmq` (class-based `WorkerHost`/`@Processor`, **not** the legacy `@nestjs/bull` `@Process()` decorator) backed by the `redis` service. Queue name: `QUEUE_NAMES.VIDEO_PROCESSING`. Requires `ioredis` as an explicit runtime dependency (BullMQ loads it lazily; not auto-installed transitively).
+
+**Video Worker** (`src/worker.module.ts`, `src/worker.main.ts`, `src/videos/video.processor.ts`): a second, standalone Nest application context (`NestFactory.createApplicationContext`), run as its own Compose service (`video-worker`) so a video-processing crash can never take down the API. `VideoProcessor` downloads the source object, runs `ffmpeg`/`ffprobe` (via `fluent-ffmpeg`; system `ffmpeg` installed in `Dockerfile.dev`) to extract duration and a thumbnail, uploads the thumbnail, and updates the video's status to `ready` or `failed` — failures are caught and logged inside the processor, never rethrown to the queue.
+
+**Any module registering an entity with relations (e.g., `WorkerModule`'s `TypeOrmModule.forFeature`) must include every entity in that relation's closure** (`Video` → `Channel` → `User`), not just the entity being queried directly — TypeORM needs the full graph to resolve relation metadata, and this only fails at runtime, not at compile time.
 
 ## Code Conventions
 
