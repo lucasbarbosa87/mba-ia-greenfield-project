@@ -32,11 +32,12 @@ export class VideoProcessor extends WorkerHost {
 
   async process(job: Job<ProcessVideoJobPayload>): Promise<void> {
     const { videoId } = job.data;
-    const video = await this.videoRepository.findOneByOrFail({
-      id: videoId,
-    });
 
     try {
+      const video = await this.videoRepository.findOneByOrFail({
+        id: videoId,
+      });
+
       const { durationSeconds, thumbnailKey } =
         await this.extractMetadataAndThumbnail(video);
 
@@ -49,7 +50,8 @@ export class VideoProcessor extends WorkerHost {
       this.logger.error(
         `Failed to process video ${videoId}: ${(error as Error).message}`,
       );
-      await this.videoRepository.update(video.id, {
+      // A no-op (0 rows affected) if videoId doesn't exist — safe either way.
+      await this.videoRepository.update(videoId, {
         status: VideoStatus.FAILED,
       });
     }

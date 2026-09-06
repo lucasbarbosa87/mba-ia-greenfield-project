@@ -106,6 +106,44 @@ describe('VideosService (integration)', () => {
       expect(persisted.channel_id).toBe(channel.id);
       expect(persisted.object_key).toContain(dto.filename);
     });
+
+    it('strips directory components from the filename before building the object key', async () => {
+      const channel = await createChannel();
+      const dto: CreateVideoDto = {
+        filename: '../other-channel/movie.mp4',
+        contentType: 'video/mp4',
+        sizeBytes: 1024,
+        partCount: 1,
+      };
+
+      const result = await videosService.createDraft(channel.user_id, dto);
+
+      const persisted = await videoRepository.findOneByOrFail({
+        id: result.id,
+      });
+      expect(persisted.object_key).toBe(`videos/${result.id}/movie.mp4`);
+    });
+
+    it('deletes the draft row if creating the multipart upload fails (compensation)', async () => {
+      const channel = await createChannel();
+      jest
+        .spyOn(storageService, 'createMultipartUpload')
+        .mockRejectedValueOnce(new Error('simulated storage outage'));
+
+      await expect(
+        videosService.createDraft(channel.user_id, {
+          filename: 'movie.mp4',
+          contentType: 'video/mp4',
+          sizeBytes: 1024,
+          partCount: 1,
+        }),
+      ).rejects.toThrow('simulated storage outage');
+
+      const remaining = await videoRepository.find({
+        where: { channel_id: channel.id },
+      });
+      expect(remaining).toHaveLength(0);
+    });
   });
 
   describe('getUploadParts', () => {

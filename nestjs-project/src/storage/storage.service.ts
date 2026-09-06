@@ -15,6 +15,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
 import type { Readable } from 'stream';
+import { StorageOperationFailedException } from '../common/exceptions/domain.exception';
 import storageConfig from '../config/storage.config';
 
 export interface UploadedPart {
@@ -52,7 +53,16 @@ export class StorageService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     try {
       await this.client.send(new HeadBucketCommand({ Bucket: this.bucket }));
-    } catch {
+    } catch (error) {
+      // Only a real "bucket doesn't exist" (404) should trigger creation —
+      // any other failure (network blip, credentials issue) must propagate
+      // so it isn't masked by a confusing "bucket already exists"-type error
+      // from CreateBucketCommand, or silently retried against a healthy bucket.
+      const statusCode = (error as { $metadata?: { httpStatusCode?: number } })
+        .$metadata?.httpStatusCode;
+      if (statusCode !== 404) {
+        throw error;
+      }
       await this.client.send(new CreateBucketCommand({ Bucket: this.bucket }));
     }
   }
@@ -70,7 +80,9 @@ export class StorageService implements OnModuleInit {
     );
 
     if (!result.UploadId) {
-      throw new Error('S3 did not return an UploadId for the multipart upload');
+      throw new StorageOperationFailedException(
+        'S3 did not return an UploadId for the multipart upload',
+      );
     }
 
     return result.UploadId;
@@ -158,7 +170,9 @@ export class StorageService implements OnModuleInit {
     );
 
     if (!result.Body) {
-      throw new Error(`S3 returned no body for object ${key}`);
+      throw new StorageOperationFailedException(
+        `S3 returned no body for object ${key}`,
+      );
     }
 
     await pipeline(result.Body as Readable, createWriteStream(destPath));

@@ -19,7 +19,7 @@ describe('VideosService', () => {
     completeMultipartUpload: jest.Mock;
     getPresignedDownloadUrl: jest.Mock;
   };
-  let channelRepository: { findOneByOrFail: jest.Mock };
+  let channelRepository: { findOneBy: jest.Mock };
   let videoRepository: { findOne: jest.Mock; update: jest.Mock };
   let videoProcessingQueue: { add: jest.Mock };
 
@@ -32,7 +32,7 @@ describe('VideosService', () => {
       getPresignedDownloadUrl: jest.fn(),
     };
     channelRepository = {
-      findOneByOrFail: jest.fn(),
+      findOneBy: jest.fn(),
     };
     videoRepository = {
       findOne: jest.fn(),
@@ -79,14 +79,30 @@ describe('VideosService', () => {
         'exceeds the 10GB upload limit',
       );
 
-      expect(channelRepository.findOneByOrFail).not.toHaveBeenCalled();
+      expect(channelRepository.findOneBy).not.toHaveBeenCalled();
+      expect(storageService.createMultipartUpload).not.toHaveBeenCalled();
+    });
+
+    it('should reject with ChannelNotFoundException when the caller has no channel', async () => {
+      channelRepository.findOneBy.mockResolvedValue(null);
+      const dto: CreateVideoDto = {
+        filename: 'movie.mp4',
+        contentType: 'video/mp4',
+        sizeBytes: 1024,
+        partCount: 1,
+      };
+
+      await expect(service.createDraft('user-1', dto)).rejects.toThrow(
+        'Channel not found',
+      );
+
       expect(storageService.createMultipartUpload).not.toHaveBeenCalled();
     });
   });
 
   describe('getUploadParts', () => {
     it('should compute only the missing parts from listParts', async () => {
-      channelRepository.findOneByOrFail.mockResolvedValue({
+      channelRepository.findOneBy.mockResolvedValue({
         id: 'channel-1',
       });
       videoRepository.findOne.mockResolvedValue({
@@ -113,11 +129,21 @@ describe('VideosService', () => {
         { partNumber: 3, url: 'https://presigned/3' },
       ]);
     });
+
+    it('should reject with ChannelNotFoundException when the caller has no channel', async () => {
+      channelRepository.findOneBy.mockResolvedValue(null);
+
+      await expect(service.getUploadParts('user-1', 'video-1')).rejects.toThrow(
+        'Channel not found',
+      );
+
+      expect(videoRepository.findOne).not.toHaveBeenCalled();
+    });
   });
 
   describe('completeUpload', () => {
     it('should reject incomplete parts before completing the multipart upload', async () => {
-      channelRepository.findOneByOrFail.mockResolvedValue({
+      channelRepository.findOneBy.mockResolvedValue({
         id: 'channel-1',
       });
       videoRepository.findOne.mockResolvedValue({

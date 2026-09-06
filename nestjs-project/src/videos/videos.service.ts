@@ -2,9 +2,11 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import type { Queue } from 'bullmq';
+import { basename } from 'path';
 import { Repository } from 'typeorm';
 import { Channel } from '../channels/entities/channel.entity';
 import {
+  ChannelNotFoundException,
   FileTooLargeException,
   IncompleteUploadException,
   UploadAlreadyCompletedException,
@@ -68,9 +70,12 @@ export class VideosService {
       throw new FileTooLargeException();
     }
 
-    const channel = await this.channelRepository.findOneByOrFail({
+    const channel = await this.channelRepository.findOneBy({
       user_id: userId,
     });
+    if (!channel) {
+      throw new ChannelNotFoundException();
+    }
 
     const video = await this.videoRepository.save(
       this.videoRepository.create({
@@ -79,38 +84,49 @@ export class VideosService {
       }),
     );
 
-    const objectKey = `videos/${video.id}/${dto.filename}`;
-    const uploadId = await this.storageService.createMultipartUpload(
-      objectKey,
-      dto.contentType,
-    );
+    // Everything past this point can fail (bad input rejected by storage,
+    // a transient storage outage). Without compensation, the draft row above
+    // would be left behind forever, half-initialized (no object_key/upload_id).
+    try {
+      // basename() strips any directory components the client-supplied
+      // filename might contain, so it can never escape the videos/{id}/
+      // prefix this object key is built under.
+      const objectKey = `videos/${video.id}/${basename(dto.filename)}`;
+      const uploadId = await this.storageService.createMultipartUpload(
+        objectKey,
+        dto.contentType,
+      );
 
-    const partUrls = await Promise.all(
-      Array.from({ length: dto.partCount }, (_, index) => index + 1).map(
-        async (partNumber) => ({
-          partNumber,
-          url: await this.storageService.getPresignedUploadPartUrl(
-            objectKey,
-            uploadId,
+      const partUrls = await Promise.all(
+        Array.from({ length: dto.partCount }, (_, index) => index + 1).map(
+          async (partNumber) => ({
             partNumber,
-          ),
-        }),
-      ),
-    );
+            url: await this.storageService.getPresignedUploadPartUrl(
+              objectKey,
+              uploadId,
+              partNumber,
+            ),
+          }),
+        ),
+      );
 
-    await this.videoRepository.update(video.id, {
-      object_key: objectKey,
-      upload_id: uploadId,
-      part_count: dto.partCount,
-      status: VideoStatus.UPLOADING,
-    });
+      await this.videoRepository.update(video.id, {
+        object_key: objectKey,
+        upload_id: uploadId,
+        part_count: dto.partCount,
+        status: VideoStatus.UPLOADING,
+      });
 
-    return {
-      id: video.id,
-      status: VideoStatus.UPLOADING,
-      uploadId,
-      partUrls,
-    };
+      return {
+        id: video.id,
+        status: VideoStatus.UPLOADING,
+        uploadId,
+        partUrls,
+      };
+    } catch (error) {
+      await this.videoRepository.delete(video.id);
+      throw error;
+    }
   }
 
   async getUploadParts(
@@ -244,9 +260,12 @@ export class VideosService {
     userId: string,
     videoId: string,
   ): Promise<Video> {
-    const channel = await this.channelRepository.findOneByOrFail({
+    const channel = await this.channelRepository.findOneBy({
       user_id: userId,
     });
+    if (!channel) {
+      throw new ChannelNotFoundException();
+    }
 
     const video = await this.videoRepository.findOne({
       where: { id: videoId, channel_id: channel.id },

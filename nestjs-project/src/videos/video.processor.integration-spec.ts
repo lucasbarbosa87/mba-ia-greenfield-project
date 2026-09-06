@@ -146,6 +146,28 @@ describe('VideoProcessor (integration)', () => {
     expect(result.thumbnail_key).toBe(`videos/${video.id}/thumbnail.png`);
   }, 20000);
 
+  it('does not crash the worker when the queued video row does not exist', async () => {
+    await queue.add(JOB_NAMES.PROCESS_VIDEO, {
+      videoId: '00000000-0000-0000-0000-000000000000',
+    });
+    // Give the bad job a moment to be picked up and fail internally, without
+    // an outcome to poll for (there's no video row to check).
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // The worker must still be alive and able to process a subsequent job.
+    const objectKey = `videos/processor-test-${counter}/source.mp4`;
+    await storageService.putObject(
+      objectKey,
+      syntheticVideoBuffer,
+      'video/mp4',
+    );
+    const video = await createVideo(objectKey);
+    await queue.add(JOB_NAMES.PROCESS_VIDEO, { videoId: video.id });
+
+    const result = await waitForOutcome(video.id);
+    expect(result.status).toBe(VideoStatus.READY);
+  }, 20000);
+
   it('marks the video as failed when the source file is not a valid video', async () => {
     const objectKey = `videos/processor-test-${counter}/not-a-video.txt`;
     await storageService.putObject(
